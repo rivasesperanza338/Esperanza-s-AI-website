@@ -1,0 +1,312 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Obby — Enhanced Obstacle Course</title>
+<style>
+  :root{--bg:#87ceeb;--ground:#2e8b57;--panel:rgba(0,0,0,0.45)}
+  body{margin:0;display:flex;align-items:center;justify-content:center;height:100vh;background:linear-gradient(#cbe7ff,#87ceeb);font-family:Inter,system-ui,-apple-system,Segoe UI,Roboto,Arial;color:#111}
+  #container{width:980px;max-width:98vw;background:white;border-radius:12px;overflow:hidden;box-shadow:0 10px 40px rgba(0,0,0,0.15)}
+  header{padding:12px 18px;background:linear-gradient(90deg,#ffffffaa,#ffffffcc);display:flex;justify-content:space-between;align-items:center}
+  header h1{margin:0;font-size:18px}
+  #gameArea{position:relative;background:linear-gradient(#87ceeb,#67b7ff);}
+  canvas{display:block;width:100%;height:auto;background:transparent;outline:none}
+  #hud{position:absolute;left:12px;top:12px;background:var(--panel);color:#fff;padding:8px 12px;border-radius:8px;font-weight:600}
+  #controls{position:absolute;right:12px;top:12px;background:var(--panel);color:#fff;padding:8px 12px;border-radius:8px;font-size:13px}
+  footer{padding:10px 14px;background:#f7f7f7;font-size:13px;color:#333;display:flex;justify-content:space-between}
+  .btn{background:#0b84ff;color:#fff;padding:6px 10px;border-radius:6px;border:none;cursor:pointer}
+  .small{font-size:12px;color:#666}
+  @media (max-width:600px){header h1{font-size:14px}}
+</style>
+</head>
+<body>
+<div id="container">
+  <header>
+    <h1>Obby — Enhanced Obstacle Course</h1>
+    <div><button id="restartBtn" class="btn">Restart</button></div>
+  </header>
+  <div id="gameArea">
+    <canvas id="gameCanvas" width="960" height="540" tabindex="0"></canvas>
+    <div id="hud">Stage: <span id="stage">1</span> &nbsp;|&nbsp; Lives: <span id="lives">3</span> &nbsp;|&nbsp; Time: <span id="timer">0.00</span>s</div>
+    <div id="controls">Use ← → to move, ↑ or Space to jump</div>
+  </div>
+  <footer>
+    <div>Fan-made Obby demo — HTML/CSS/JS</div>
+    <div class="small">Features: disappearing planks, timed stage timer, strong boosters, rising lava, moving enemies, dynamic fog, background music</div>
+  </footer>
+</div>
+
+<script>
+// Enhanced Obby implementing user's choices
+// 1B: disappearing platforms (instant disappear, respawn 4s)
+// 2B: timer counts up
+// 3B: strong boosters ×2.5
+// 4C: dynamic fog
+// 5E: background ambient loop
+// 6C: rising/falling lava
+// 7A: left-right enemies
+
+const canvas = document.getElementById('gameCanvas');
+const ctx = canvas.getContext('2d');
+const stageLabel = document.getElementById('stage');
+const livesLabel = document.getElementById('lives');
+const timerLabel = document.getElementById('timer');
+const restartBtn = document.getElementById('restartBtn');
+
+const W = canvas.width, H = canvas.height;
+canvas.setAttribute('tabindex','0');
+canvas.addEventListener('click', ()=> canvas.focus());
+
+// Input
+const keys = {};
+document.addEventListener('keydown', e => {
+  if (["ArrowLeft","ArrowRight","ArrowUp","Space","KeyA","KeyD"].includes(e.code)) e.preventDefault();
+  keys[e.code] = true;
+});
+document.addEventListener('keyup', e => { keys[e.code] = false; });
+
+// Landing sound (simple WebAudio blip)
+let landCtx = null;
+function ensureLandAudio(){
+  if(landCtx) return;
+  try{ landCtx = new (window.AudioContext||window.webkitAudioContext)(); }catch(e){ landCtx = null; }
+}
+function playLand(){
+  try{
+    ensureLandAudio();
+    if(!landCtx) return;
+    const o = landCtx.createOscillator();
+    const g = landCtx.createGain();
+    o.type = 'sine'; o.frequency.value = 320;
+    g.gain.setValueAtTime(0.18, landCtx.currentTime);
+    g.gain.exponentialRampToValueAtTime(0.0001, landCtx.currentTime + 0.12);
+    o.connect(g); g.connect(landCtx.destination);
+    o.start(); o.stop(landCtx.currentTime + 0.12);
+  }catch(e){ /* ignore audio errors */ }
+}
+
+const player = {
+  x: 80, y: 420, w: 34, h: 50,
+  vx: 0, vy: 0,
+  speed: 3.2,
+  jumpForce: 13,
+  gravity: 0.5,
+  onGround: false,
+  color: '#ffce54',
+  lives: 3
+};
+
+// World objects
+let platforms = [];
+let enemies = [];
+let lavaPools = [];
+let fog = { offset:0 };
+let stage = 1;
+let checkpoint = { x:80, y:420 };
+let stageStartTime = performance.now();
+
+// Background ambient audio (starts on user gesture)
+let audioCtx = null, bgOsc1 = null, bgOsc2 = null, bgGain = null;
+function startAmbient(){
+  if(audioCtx) return;
+  try{
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    bgGain = audioCtx.createGain(); bgGain.gain.value = 0.05; bgGain.connect(audioCtx.destination);
+    bgOsc1 = audioCtx.createOscillator(); bgOsc1.type = 'sine'; bgOsc1.frequency.value = 110;
+    bgOsc2 = audioCtx.createOscillator(); bgOsc2.type = 'sine'; bgOsc2.frequency.value = 220;
+    const mix = audioCtx.createGain(); mix.gain.value = 0.6; bgOsc1.connect(mix); bgOsc2.connect(mix); mix.connect(bgGain);
+    bgOsc1.start(); bgOsc2.start();
+    setInterval(()=>{
+      if(!audioCtx) return;
+      bgOsc1.frequency.setTargetAtTime(100 + Math.random()*40, audioCtx.currentTime, 1.0);
+      bgOsc2.frequency.setTargetAtTime(200 + Math.random()*80, audioCtx.currentTime, 1.0);
+    }, 2200);
+  }catch(e){ audioCtx = null; }
+}
+// call startAmbient on first user interaction
+window.addEventListener('pointerdown', ()=>{ try{ startAmbient(); if(audioCtx && audioCtx.state === 'suspended') audioCtx.resume(); }catch(e){} }, { once:true });
+
+function createStage(n){
+  platforms = [];
+  enemies = [];
+  lavaPools = [];
+
+  // floor
+  platforms.push({ x:0, y: 500, w: W, h: 40, type:'static' });
+  platforms.push({ x:40, y:420, w:120, h:14, type:'static' });
+
+  const count = 6 + Math.floor(n * 1.3);
+  let x = 200;
+  for(let i=0;i<count;i++){
+    const r = Math.random();
+    if(r < 0.55){
+      const y = 180 + Math.random()*240;
+      platforms.push({ x:x, y:y, w: 110, h:14, type:'static' });
+    } else if(r < 0.75){
+      const y = 160 + Math.random()*260;
+      platforms.push({ x:x, y:y, w: 100, h:14, type:'disappear', hiddenUntil:0 });
+    } else if(r < 0.9){
+      const y = 180 + Math.random()*220;
+      const range = 80 + Math.random()*200 + n*6;
+      const speed = 0.4 + Math.random()*0.9 + n*0.06;
+      platforms.push({ x:x, y:y, w:90, h:14, type:'moving', vx: speed, baseX: x, range });
+    } else {
+      const y = 200 + Math.random()*220;
+      platforms.push({ x:x, y:y, w:70, h:8, type:'booster', power:2.5 });
+    }
+
+    if(Math.random() < 0.25 + n*0.02){
+      enemies.push({ x: x + 30, y: (platforms[platforms.length-1].y || 380) - 40, w:30, h:30, vx: 0.8 + Math.random()*0.8 + n*0.05, baseX: x + 30, range: 60 + Math.random()*120 });
+    }
+    x += 160 + Math.random()*140;
+  }
+
+  const lavaX = Math.min(W-200, x - 80);
+  lavaPools.push({ x: lavaX, baseY: 520, amplitude: 80 + n*8, period: 3000 + n*200, phase: Math.random()*Math.PI*2, w: 160, h: 24 });
+
+  platforms.push({ x: Math.min(W-80, x), y: 420, w: 64, h: 30, type:'goal' });
+  checkpoint = { x: 80, y: 420 };
+  stageStartTime = performance.now();
+}
+createStage(stage);
+
+function rectsOverlap(a,b){ return !(a.x + a.w < b.x || a.x > b.x + b.w || a.y + a.h < b.y || a.y > b.y + b.h); }
+
+function update(dt){
+  let left = keys['ArrowLeft'] || keys['KeyA'];
+  let right = keys['ArrowRight'] || keys['KeyD'];
+  if(left) player.vx = -player.speed;
+  else if(right) player.vx = player.speed;
+  else player.vx = 0;
+
+  if((keys['ArrowUp'] || keys['Space']) && player.onGround){ player.vy = -player.jumpForce; player.onGround = false; }
+
+  player.vy += player.gravity;
+  player.x += player.vx * dt;
+  player.y += player.vy * dt;
+  player.x = Math.max(0, Math.min(W - player.w, player.x));
+
+  for(let p of platforms){ if(p.type === 'moving'){ p.x += p.vx * dt; if(p.x > p.baseX + p.range || p.x < p.baseX - p.range) p.vx *= -1; } }
+
+  for(let e of enemies){
+    e.x += e.vx * dt;
+    if(e.x > e.baseX + e.range || e.x < e.baseX - e.range) e.vx *= -1;
+    const er = { x:e.x, y:e.y, w:e.w, h:e.h };
+    const pr = { x:player.x, y:player.y, w:player.w, h:player.h };
+    if(rectsOverlap(er, pr)){ hurtPlayer(); }
+  }
+
+  const t = performance.now();
+  for(let l of lavaPools){
+    const phase = ((t + (l.phase||0)) % l.period) / l.period;
+    const s = Math.sin(phase * Math.PI * 2);
+    l.y = l.baseY - (l.amplitude * 0.5) * (s + 1);
+  }
+
+  // platform collisions
+  player.onGround = false;
+  for(let p of platforms){
+    if(p.type === 'disappear' && p.hiddenUntil && performance.now() < p.hiddenUntil) continue;
+
+    if(player.vy >= 0 && player.x + player.w > p.x + 2 && player.x < p.x + p.w - 2 && player.y + player.h > p.y && player.y + player.h < p.y + p.h + Math.abs(player.vy) + 2){
+      // landing sound
+      playLand();
+      if(p.type === 'booster'){
+        player.y = p.y - player.h; player.vy = 0; player.onGround = true;
+        player.vy = -player.jumpForce * p.power;
+      } else if(p.type === 'disappear'){
+        p.hiddenUntil = performance.now() + 4000;
+        player.y = p.y - player.h; player.vy = 0; player.onGround = true;
+      } else {
+        player.y = p.y - player.h; player.vy = 0; player.onGround = true;
+        if(p.type === 'goal'){ nextStage(); }
+      }
+    }
+  }
+
+  // lava collisions
+  for(let l of lavaPools){
+    const lavaRect = { x: l.x, y: l.y - l.h, w: l.w, h: l.h };
+    const playerRect = { x: player.x, y: player.y, w: player.w, h: player.h };
+    if(rectsOverlap(lavaRect, playerRect)) hurtPlayer();
+  }
+
+  if(player.y > H + 120) hurtPlayer();
+}
+
+function hurtPlayer(){
+  player.lives -= 1; livesLabel.textContent = player.lives;
+  if(player.lives <= 0){
+    player.lives = 3; stage = 1; stageLabel.textContent = stage; livesLabel.textContent = player.lives; createStage(stage); respawnToCheckpoint(true);
+  } else {
+    respawnToCheckpoint(false);
+  }
+}
+
+function respawnToCheckpoint(fullReset){
+  player.x = checkpoint.x; player.y = checkpoint.y; player.vx = 0; player.vy = 0; player.onGround = false;
+  if(fullReset) createStage(stage);
+}
+
+function nextStage(){ stage += 1; stageLabel.textContent = stage; createStage(stage); respawnToCheckpoint(false); }
+
+function draw(){
+  ctx.fillStyle = '#9be6ff'; ctx.fillRect(0,0,W,H);
+  ctx.fillStyle = '#66b07a'; ctx.beginPath(); ctx.arc(160,520,220,Math.PI,0); ctx.fill(); ctx.beginPath(); ctx.arc(480,540,300,Math.PI,0); ctx.fill();
+
+  drawFog();
+
+  for(let p of platforms){
+    if(p.type === 'disappear' && p.hiddenUntil && performance.now() < p.hiddenUntil) continue;
+    if(p.type === 'booster'){
+      ctx.fillStyle = '#ffd24d'; ctx.fillRect(p.x, p.y, p.w, p.h);
+      ctx.fillStyle = '#ff9f1c'; ctx.fillRect(p.x, p.y + p.h, p.w, 4);
+      ctx.fillStyle = '#111'; ctx.fillText('BOOST', p.x + p.w/2 - 18, p.y + p.h - 2);
+    } else {
+      ctx.fillStyle = (p.type === 'goal') ? '#00d153' : '#7a7a7a';
+      ctx.fillRect(p.x, p.y, p.w, p.h);
+      ctx.fillStyle = '#5a5a5a'; ctx.fillRect(p.x, p.y + p.h, p.w, 6);
+    }
+  }
+
+  for(let l of lavaPools){ ctx.fillStyle = '#ff5a1a'; ctx.fillRect(l.x, l.y - l.h, l.w, l.h); ctx.fillStyle = '#ff8a4d'; ctx.fillRect(l.x, l.y - l.h - 6, l.w, 6); }
+
+  for(let e of enemies){ ctx.fillStyle = '#8b2d2d'; ctx.fillRect(e.x, e.y, e.w, e.h); ctx.fillStyle='#000'; ctx.fillRect(e.x+6,e.y+8,6,6); ctx.fillRect(e.x+18,e.y+8,6,6); }
+
+  ctx.fillStyle = player.color; ctx.fillRect(player.x, player.y, player.w, player.h);
+  ctx.fillStyle = '#111'; ctx.fillRect(player.x + 8, player.y + 12, 5, 5); ctx.fillRect(player.x + 21, player.y + 12, 5, 5);
+  ctx.strokeStyle = '#111'; ctx.beginPath(); ctx.arc(player.x + player.w/2, player.y + 34, 8, 0, Math.PI); ctx.stroke();
+
+  const elapsed = (performance.now() - stageStartTime) / 1000; timerLabel.textContent = elapsed.toFixed(2);
+}
+
+function drawFog(){
+  fog.offset += 0.15;
+  const bands = 4;
+  for(let i=0;i<bands;i++){
+    const alpha = 0.06 + i*0.02;
+    ctx.fillStyle = `rgba(240,248,255,${alpha})`;
+    const y = 60 + i*80 + Math.sin((fog.offset + i*10)/12) * 8;
+    ctx.beginPath(); ctx.ellipse(W/2 + Math.sin((fog.offset + i*30)/20)*40, y, W*0.9, 40, 0, 0, Math.PI*2); ctx.fill();
+  }
+}
+
+let last = performance.now();
+function loop(now){
+  const dt = Math.min(2, (now - last)/16.6667); last = now;
+  update(dt);
+  draw();
+  requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
+
+restartBtn.addEventListener('click', ()=>{ stage = 1; player.lives = 3; stageLabel.textContent = stage; livesLabel.textContent = player.lives; createStage(stage); respawnToCheckpoint(true); });
+
+window.addEventListener('pointerdown', ()=>{ if(audioCtx && audioCtx.state === 'suspended') audioCtx.resume(); });
+
+try{ canvas.focus(); }catch(e){}
+
+</script>
+</body>
+</html>
